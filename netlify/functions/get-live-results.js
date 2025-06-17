@@ -1,16 +1,18 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-// Helper function to get the current date in the format used by the website's source, e.g., "06/17/25"
+// Helper function to get the current date in MM/DD/YY format for New York
 function getTodaysDateFormatted() {
   const today = new Date();
-  const options = { timeZone: 'America/New_York' };
-  
-  const year = today.toLocaleString('en-US', { ...options, year: '2-digit' });
-  const month = today.toLocaleString('en-US', { ...options, month: '2-digit' });
-  const day = today.toLocaleString('en-US', { ...options, day: '2-digit' });
-  
-  return `${month}/${day}/${year}`;
+  // Options to get the date in the America/New_York timezone
+  const options = {
+    timeZone: 'America/New_York',
+    year: '2-digit',
+    month: '2-digit',
+    day: '2-digit',
+  };
+  // This will format the date as "06/17/25"
+  return new Intl.DateTimeFormat('en-US', options).format(today);
 }
 
 // The main function that Netlify will run
@@ -19,50 +21,48 @@ exports.handler = async function(event, context) {
     { name: 'NUMBERS', url: 'https://nylottery.ny.gov/draw-game?game=numbers' },
     { name: 'Win 4', url: 'https://nylottery.ny.gov/draw-game?game=win4' },
     { name: 'Take 5', url: 'https://nylottery.ny.gov/draw-game?game=take5' },
-    { name: 'Powerball', url: 'https://nylottery.ny.gov/draw-game?game=powerball' },
-    { name: 'Mega Millions', url: 'https://nylottery.ny.gov/draw-game?game=mega-millions' },
-    { name: 'Cash4Life', url: 'https://nylottery.ny.gov/draw-game?game=cash4life' },
-    { name: 'NY Lotto', url: 'https://nylottery.ny.gov/draw-game?game=lotto' },
-    { name: 'Pick 10', url: 'https://nylottery.ny.gov/draw-game?game=pick10' },
+    // Add other game pages here if needed
   ];
 
   const liveResults = {};
-  const todaysDate = getTodaysDateFormatted();
-  console.log(`Starting scraper for date: ${todaysDate}`);
+  const todaysDate = getTodaysDateFormatted(); // e.g., "06/17/25"
+  console.log(`Starting scraper for date string: ${todaysDate}`);
 
-  // Use Promise.all to fetch all pages concurrently for speed
   await Promise.all(
     gamesToScrape.map(async (game) => {
       try {
         const { data } = await axios.get(game.url);
         const $ = cheerio.load(data);
 
-        // This selector is now based on the exact structure you provided
+        // Find all the draw result containers on the page
         $('div[class*="DrawGame-module--desktop-container"]').each((index, element) => {
           const container = $(element);
           
-          // The date text is inside a div, e.g., "Midday Tue 06/17/25"
-          const dateString = container.find('div[class*="DrawGame-module--date-"]').text().trim();
+          // The full date text is inside an h4 tag, e.g., "Midday Tue 06/17/25"
+          const drawDateText = container.find('h4').text().trim();
           
-          console.log(`Checking ${game.name}: Scraped date string is "${dateString}"`);
-          
-          // Check if the scraped date string contains today's formatted date
-          if (dateString.includes(todaysDate)) {
-            const drawTime = container.find('div[class*="DrawGame-module--label"]').text().trim(); // 'Midday' or 'Evening'
+          console.log(`Checking ${game.name}: Found raw date text "${drawDateText}"`);
+
+          // *** THE CRITICAL FIX IS HERE ***
+          // We check if the raw text from the website INCLUDES today's formatted date
+          if (drawDateText.includes(todaysDate)) {
+            const drawTime = container.find('div[class*="DrawGame-module--label"]').text().trim();
             
-            // The numbers are in individual span elements
+            // The numbers are in individual spans, we must join them
             const numbers = container.find('div[class*="DrawGame-module--numbers"] span')
                                      .map((i, el) => $(el).text())
                                      .get()
-                                     .join(' '); // Join with spaces for readability
+                                     .join(''); // Join without spaces for games like Numbers/Win4
 
             if (drawTime && numbers) {
               if (!liveResults[game.name]) {
                 liveResults[game.name] = {};
               }
               liveResults[game.name][drawTime] = numbers;
-              console.log(`SUCCESS: Match found for ${game.name} - ${drawTime}: ${numbers}`);
+              console.log(`SUCCESS: Date match for ${game.name} - ${drawTime}: ${numbers}`);
             }
+          } else {
+             console.log(`NO MATCH: "${drawDateText}" does not contain "${todaysDate}"`);
           }
         });
 
