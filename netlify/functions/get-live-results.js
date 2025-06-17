@@ -1,87 +1,82 @@
-const axios = require('axios');
-const cheerio = require('cheerio');
+// This uses a headless browser (Puppeteer) to render the page like a real user would.
+// This is the most reliable way to scrape a modern JavaScript-driven website.
+const chromium = require('chrome-aws-lambda');
+const puppeteer = require('puppeteer-core');
 
-// Helper function to get the current date in the MM/DD/YY format for New York
-function getTodaysDateFormatted() {
-  const today = new Date();
-  const options = {
-    timeZone: 'America/New_York',
-    year: '2-digit',
-    month: '2-digit',
-    day: '2-digit',
-  };
-  // This will correctly format the date as "06/17/25"
-  return new Intl.DateTimeFormat('en-US', options).format(today);
-}
-
-// The main function that Netlify will run
 exports.handler = async function(event, context) {
-  const gamesToScrape = [
-    { name: 'Numbers', url: 'https://nylottery.ny.gov/draw-game?game=numbers' },
-    { name: 'Win 4', url: 'https://nylottery.ny.gov/draw-game?game=win4' },
-    { name: 'Take 5', url: 'https://nylottery.ny.gov/draw-game?game=take5' },
-    { name: 'NY Lotto', url: 'https://nylottery.ny.gov/draw-game?game=lotto' },
-    { name: 'Cash4Life', url: 'https://nylottery.ny.gov/draw-game?game=cash4life' },
-    { name: 'Powerball', url: 'https://nylottery.ny.gov/draw-game?game=powerball' },
-    { name: 'Mega Millions', url: 'https://nylottery.ny.gov/draw-game?game=mega-millions' },
-    { name: 'Pick 10', url: 'https://nylottery.ny.gov/draw-game?game=pick10' },
-  ];
+  let browser = null;
+  
+  try {
+    // Launch the headless browser
+    browser = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath,
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
+    });
 
-  const liveResults = {};
-  const todaysDate = getTodaysDateFormatted(); // e.g., "06/17/25"
-  console.log(`Starting scraper. Searching for date: ${todaysDate}`);
+    const page = await browser.newPage();
+    // Go to the NY Lottery homepage
+    await page.goto('https://nylottery.ny.gov/', { waitUntil: 'networkidle2' });
 
-  // Use Promise.all to fetch all pages concurrently for speed
-  await Promise.all(
-    gamesToScrape.map(async (game) => {
-      try {
-        const { data } = await axios.get(game.url);
-        const $ = cheerio.load(data);
+    // Wait for the main container of the winning numbers to be visible on the page.
+    // This ensures that the JavaScript has finished loading the data.
+    await page.waitForSelector('div[class*="WinningNumbers-module--container"]', { timeout: 15000 });
+    
+    // Now that the page is fully loaded, get the final HTML content
+    const content = await page.content();
 
-        // Find all the draw result containers on the page
-        $('div[class*="DrawGame-module--desktop-container"]').each((index, element) => {
-          const container = $(element);
-          
-          // The full date text is inside an h4 tag, e.g., "Midday Tue 06/17/25"
-          const drawDateText = container.find('h4').text().trim();
-          
-          console.log(`Checking ${game.name}: Found raw date text "${drawDateText}"`);
+    // Use a regular expression to find the JSON data embedded in the page's script tags.
+    // This is more reliable than parsing HTML with Cheerio.
+    const regex = /<script id="gatsby-initial-page-data" type="application\/json">(.*?)<\/script>/;
+    const match = content.match(regex);
+    
+    if (!match || !match[1]) {
+      throw new Error("Could not find page data JSON blob.");
+    }
 
-          // *** THE CRITICAL FIX: Check if the raw text from the website INCLUDES today's formatted date ***
-          if (drawDateText.includes(todaysDate)) {
-            const drawTime = container.find('div[class*="DrawGame-module--label"]').text().trim() || 'Evening'; // Default to Evening if no label
-            
-            // The numbers are in individual spans, we must join them
-            const numbers = container.find('div[class*="DrawGame-module--numbers"] span')
-                                     .map((i, el) => $(el).text())
-                                     .get()
-                                     .join(' '); // Join with spaces for readability
+    const pageData = JSON.parse(match[1]);
+    
+    // The winning numbers are deeply nested in the page's data structure.
+    // We navigate this structure to find the winning numbers component.
+    const winningNumbersData = pageData.result.data.allContentstackWinningNumbers.nodes;
+    
+    const liveResults = {};
 
-            if (numbers) {
-              if (!liveResults[game.name]) {
-                liveResults[game.name] = {};
-              }
-              // Prevent overwriting if Midday and Evening results are on the same page for the same day
-              liveResults[game.name][drawTime] = numbers;
-              console.log(`SUCCESS: Date match for ${game.name} - ${drawTime}: ${numbers}`);
-            }
+    winningNumbersData.forEach(game => {
+      const gameName = game.game_name.toUpperCase();
+      
+      // We only care about games that have recent draws
+      if (game.draws && game.draws.length > 0) {
+        liveResults[gameName] = {};
+        game.draws.forEach(draw => {
+          const drawTime = draw.draw_time; // 'Midday' or 'Evening'
+          const numbers = draw.winning_numbers;
+          if (drawTime && numbers) {
+            liveResults[gameName][drawTime] = numbers;
           }
         });
-
-      } catch (error) {
-        console.error(`Error scraping ${game.name}:`, error.message);
       }
-    })
-  );
+    });
 
-  console.log("Scraping complete. Final live results:", JSON.stringify(liveResults, null, 2));
+    await browser.close();
 
-  return {
-    statusCode: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    },
-    body: JSON.stringify(liveResults),
-  };
+    console.log("Scraping complete. Final live results:", JSON.stringify(liveResults, null, 2));
+
+    return {
+      statusCode: 200,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify(liveResults),
+    };
+  } catch (error) {
+    console.error('Error in headless browser function:', error);
+    if (browser !== null) {
+      await browser.close();
+    }
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: 'Failed to fetch lottery results.', details: error.message }),
+    };
+  }
 };
