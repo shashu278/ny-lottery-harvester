@@ -15,25 +15,50 @@ exports.handler = async function(event, context) {
     
     // This is where we will store the results
     const liveResults = {};
+    console.log("Scraper function started. Parsing nylottery.ny.gov...");
 
     // Find the elements containing the winning numbers on the page
-    // NOTE: These selectors are based on the website's structure as of today
-    // and may need to be updated if the website changes its design.
-    $('div.WinningNumbers-module--game-container--Q48A0').each((index, element) => {
-      const gameName = $(element).find('h3 a').text().trim();
-      
-      if (gameName === 'NUMBERS' || gameName === 'Win 4') {
+    // This selector is more robust and less likely to change.
+    $('div[class*="WinningNumbers-module--game-container"]').each((index, element) => {
+      // Find the game name within each container
+      const gameNameElement = $(element).find('h3 a');
+      const gameName = gameNameElement.text().trim().toUpperCase();
+
+      if (gameName) {
+        console.log(`Found game container for: ${gameName}`);
         const results = {};
-        $(element).find('div.DrawGame-module--container--T8aW5').each((i, draw) => {
-          const drawTime = $(draw).find('div.DrawGame-module--label--c714C').text().trim(); // 'Midday' or 'Evening'
-          const numbers = $(draw).find('div.DrawGame-module--numbers--JhsBW').text().trim();
-          if (drawTime && numbers) {
-            results[drawTime] = numbers;
-          }
-        });
-        if(Object.keys(results).length > 0) liveResults[gameName] = results;
+
+        // Logic for games with Midday/Evening draws (Numbers, Win 4, Take 5)
+        if (gameName === 'NUMBERS' || gameName === 'WIN 4' || gameName === 'TAKE 5') {
+            $(element).find('div[class*="DrawGame-module--container"]').each((i, draw) => {
+                const drawTime = $(draw).find('div[class*="DrawGame-module--label"]').text().trim();
+                const numbers = $(draw).find('div[class*="DrawGame-module--numbers"]').text().trim();
+                if (drawTime && numbers) {
+                    console.log(`  - Found draw: ${drawTime} with numbers: ${numbers}`);
+                    results[drawTime] = numbers;
+                }
+            });
+        }
+        // Logic for single-draw games (Powerball, Mega Millions, etc.)
+        else {
+            const numbers = $(element).find('div[class*="WinningNumbers-module--numbers-container"]').text().trim();
+             if (numbers) {
+                console.log(`  - Found single draw with numbers: ${numbers}`);
+                results['Evening'] = numbers.replace(/\s+/g, ' '); // Clean up spacing
+             }
+        }
+        
+        if (Object.keys(results).length > 0) {
+          liveResults[gameName] = results;
+        }
       }
     });
+    
+    console.log("Scraping complete. Final results:", JSON.stringify(liveResults, null, 2));
+
+    if (Object.keys(liveResults).length === 0) {
+        console.log("Warning: No results were found on the page. The website structure may have changed.");
+    }
 
     // Return the data as a successful JSON response
     return {
@@ -46,7 +71,7 @@ exports.handler = async function(event, context) {
     };
     
   } catch (error) {
-    console.error("Scraping error:", error);
+    console.error("Scraping error:", error.message);
     // Return an error response
     return {
       statusCode: 500,
