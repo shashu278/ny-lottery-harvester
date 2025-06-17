@@ -1,13 +1,25 @@
-// This uses a headless browser (Puppeteer) to render the page like a real user would.
-// This is the most reliable way to scrape a modern JavaScript-driven website.
 const chromium = require('chrome-aws-lambda');
 const puppeteer = require('puppeteer-core');
 
+// Helper function to get today's date in the MM/DD/YY format for New York
+function getTodaysDateFormatted() {
+  const today = new Date();
+  const options = {
+    timeZone: 'America/New_York',
+    year: '2-digit',
+    month: '2-digit',
+    day: '2-digit',
+  };
+  return new Intl.DateTimeFormat('en-US', options).format(today);
+}
+
 exports.handler = async function(event, context) {
   let browser = null;
-  
+  const todaysDate = getTodaysDateFormatted();
+  console.log(`Starting headless browser for date: ${todaysDate}`);
+
   try {
-    // Launch the headless browser
+    // Launch the headless browser with optimizations
     browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
@@ -17,48 +29,54 @@ exports.handler = async function(event, context) {
     });
 
     const page = await browser.newPage();
-    // Go to the NY Lottery homepage
-    await page.goto('https://nylottery.ny.gov/', { waitUntil: 'networkidle2' });
-
-    // Wait for the main container of the winning numbers to be visible on the page.
-    // This ensures that the JavaScript has finished loading the data.
-    await page.waitForSelector('div[class*="WinningNumbers-module--container"]', { timeout: 15000 });
     
-    // Now that the page is fully loaded, get the final HTML content
-    const content = await page.content();
-
-    // Use a regular expression to find the JSON data embedded in the page's script tags.
-    // This is more reliable than parsing HTML with Cheerio.
-    const regex = /<script id="gatsby-initial-page-data" type="application\/json">(.*?)<\/script>/;
-    const match = content.match(regex);
-    
-    if (!match || !match[1]) {
-      throw new Error("Could not find page data JSON blob.");
-    }
-
-    const pageData = JSON.parse(match[1]);
-    
-    // The winning numbers are deeply nested in the page's data structure.
-    // We navigate this structure to find the winning numbers component.
-    const winningNumbersData = pageData.result.data.allContentstackWinningNumbers.nodes;
-    
-    const liveResults = {};
-
-    winningNumbersData.forEach(game => {
-      const gameName = game.game_name.toUpperCase();
-      
-      // We only care about games that have recent draws
-      if (game.draws && game.draws.length > 0) {
-        liveResults[gameName] = {};
-        game.draws.forEach(draw => {
-          const drawTime = draw.draw_time; // 'Midday' or 'Evening'
-          const numbers = draw.winning_numbers;
-          if (drawTime && numbers) {
-            liveResults[gameName][drawTime] = numbers;
-          }
-        });
+    // Optimize by blocking unnecessary resources like images and CSS
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
+        req.abort();
+      } else {
+        req.continue();
       }
     });
+
+    // Go to the NY Lottery homepage
+    await page.goto('https://nylottery.ny.gov/', { waitUntil: 'networkidle2', timeout: 20000 });
+
+    // Use page.evaluate to run code directly in the browser's context
+    // This is faster and more reliable than passing the HTML back and forth
+    const liveResults = await page.evaluate((date) => {
+      const results = {};
+      // Select all game containers on the page
+      const gameContainers = document.querySelectorAll('div[class*="WinningNumbers-module--game-container"]');
+      
+      gameContainers.forEach(container => {
+        const gameNameElement = container.querySelector('h3 a');
+        if (!gameNameElement) return;
+        
+        const gameName = gameNameElement.innerText.trim().toUpperCase();
+        const gameDraws = {};
+
+        // Find Midday/Evening draw containers
+        const drawElements = container.querySelectorAll('div[class*="DrawGame-module--container"]');
+        if (drawElements.length > 0) {
+            drawElements.forEach(draw => {
+                const drawTime = draw.querySelector('div[class*="DrawGame-module--label"]').innerText.trim();
+                const dateText = draw.querySelector('div[class*="DrawGame-module--date-"]').innerText.trim();
+                
+                if (dateText.includes(date)) {
+                    const numbers = Array.from(draw.querySelectorAll('div[class*="DrawGame-module--numbers"] span')).map(span => span.innerText).join(' ');
+                    gameDraws[drawTime] = numbers;
+                }
+            });
+        }
+        
+        if (Object.keys(gameDraws).length > 0) {
+            results[gameName] = gameDraws;
+        }
+      });
+      return results;
+    }, todaysDate); // Pass today's date into the browser context
 
     await browser.close();
 
