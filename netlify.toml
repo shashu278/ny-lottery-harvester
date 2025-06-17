@@ -1,10 +1,7 @@
 [build]
-  # This tells Netlify where to find your serverless functions
   functions = "netlify/functions"
 
-# This is an optional but powerful rule. It makes your function accessible
-# at a cleaner URL, like yoursite.com/api/get-live-results
-[[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/:splat"
-  status = 200
+# This increases the timeout for all functions to 26 seconds (the max on the free tier)
+# This is the key to preventing the "displays nothing" error.
+[functions]
+  timeout = 26
