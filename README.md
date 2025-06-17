@@ -1,0 +1,1 @@
+# ny-lottery-harvester
